@@ -22,10 +22,14 @@ module Lr
     def current
       @exps[@ptr]
     end
+
+    def terminated?
+      @ptr + 1 == @exps.size
+    end
   end
 
   class Grammer
-    attr_reader :rules, :terms, :symbols, :start_symbol, :firsts, :follows, :tree, :table
+    attr_reader :rules, :terms, :symbols, :start_symbol, :firsts, :follows, :states, :table
 
     def initialize(rules)
       @rules = rules.map.with_index{|rule, i| Rule.new(i, rule)}
@@ -34,7 +38,7 @@ module Lr
       @firsts = {}
       resolve_firsts(@start_symbol)
       resolve_follows
-      @tree = TransitionTree.new(self)
+      @states = TransitionStateList.new(self)
       @table = Table.new(self)
     end
 
@@ -75,15 +79,17 @@ module Lr
     end
   end
 
-  class TransitionTree
-    attr_reader :transitions, :rules, :id, :last_id
-
-    def initialize(grammer, id=0, rules=nil)
-      @g = grammer
+  class TransitionState
+    attr_reader :id, :transitions, :rules
+    def initialize(id, grammer, rules)
       @id = id
-      @last_id = @id
-      @rules = rules || @g.rules
+      @g = grammer
+      @rules = Marshal.load(Marshal.dump(rules))
       @transitions = {}
+    end
+
+    def succeed(id)
+      # separate rules to branch
       @rules.each do |rule|
         next if rule.current.nil?
         rule = Marshal.load(Marshal.dump(rule))
@@ -91,49 +97,61 @@ module Lr
         @transitions[rule.current].push rule
         rule.ptr += 1
       end
-      @transitions.each do |sym, rules|
-        @transitions[sym] = TransitionTree.new(@g, @last_id + 1, rules)
-        @last_id = @transitions[sym].last_id
+      # create children
+      @transitions.map do |sym, rules|
+        state = TransitionState.new(id, @g, rules)
+        @transitions[sym] = id
+        id += 1
+        state
       end
     end
 
-    def flatten(table=[])
-      table[@id] = self
-      @transitions.values.each{|tree| tree.flatten(table)}
-      table
+    def to_s
+      "#{@id} : #{@transitions.map{|sym,id| "#{sym} -> #{id}"}.join(', ')}"
+    end
+  end
+
+  class TransitionStateList
+    attr_accessor :list
+
+    def initialize(grammer)
+      @g = grammer
+      @list = []
+      stack = [TransitionState.new(0, @g, @g.rules)]
+      while !stack.empty?
+        state = stack.shift
+        @list.push state
+        stack.concat state.succeed(@list.size + stack.size)
+      end
     end
 
     def to_s
-      "#{@id} : #{@transitions.map{|sym,tree| "#{sym} -> #{tree.id}"}.join(', ')}"
+      @list.map(&:to_s).join("\n")
     end
   end
 
   class Table
     def initialize(grammer)
       @g = grammer
-      @trees = @g.tree.flatten
+      @states = @g.states
       @table = []
-      @trees.each do |tree|
-        @table[tree.id] = {}
-        tree.transitions.map do |sym, child|
-          @table[tree.id][sym] = [sym.is_a?(Symbol) ? :goto : :shift, child.id]
+      @states.list.each do |state|
+        @table[state.id] = {}
+        state.transitions.map do |sym, to|
+          @table[state.id][sym] = [sym.is_a?(Symbol) ? :goto : :shift, to]
         end
-        # error if terminated rules > 1
-        tree.rules.each do |rule|
+        # MEMO: error if terminated rules > 1
+        state.rules.each do |rule|
           next unless rule.current.nil?
           if rule.from == @g.start_symbol
-            @table[tree.id][nil] = [:acc]
+            @table[state.id][nil] = [:acc]
           else
             [*@g.terms, nil].each do |term|
-              @table[tree.id][term] = [:reduce, rule.id]
+              @table[state.id][term] = [:reduce, rule.id]
             end
           end
         end
       end
-    end
-
-    def states_to_s
-      @states.map(&:to_s).join("\n")
     end
 
     def to_s
@@ -153,11 +171,21 @@ end
 if __FILE__ == $0
   require 'pp'
   require 'pry'
-  lr0 = Lr::Grammer.new [
+  # lr0 = Lr::Grammer.new [
+  #   [:s, :e],
+  #   [:e, :e, '+', 'num'],
+  #   [:e, :e, '*', 'num'],
+  #   [:e, 'num']
+  # ]
+  # puts lr0.states
+  # puts lr0.table
+  slr1 = Lr::Grammer.new [
     [:s, :e],
-    [:e, :e, '+', 'num'],
-    [:e, :e, '*', 'num'],
-    [:e, 'num']
+    [:e, :e, '+', :t],
+    [:e, :t],
+    [:t, :t, '*', 'num'],
+    [:t, 'num']
   ]
-  puts lr0.table.to_s
+  puts slr1.states
+  puts slr1.table
 end
