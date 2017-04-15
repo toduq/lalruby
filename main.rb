@@ -26,6 +26,10 @@ module Lr
     def terminated?
       @ptr + 1 == @exps.size
     end
+
+    def ==(o)
+      @id == o.id && @ptr == o.ptr
+    end
   end
 
   class Grammer
@@ -81,47 +85,74 @@ module Lr
 
   class TransitionState
     attr_reader :id, :transitions, :rules
-    def initialize(id, grammer, rules)
+    def initialize(id, grammer, rules, list)
       @id = id
       @g = grammer
-      @rules = Marshal.load(Marshal.dump(rules))
+      @list = list
+      @rules = rules
       @transitions = {}
+      # expand [A -> v @ B] to rules that starts with B [B -> *]
+      @rules.each do |rule|
+        next unless rule.exps.size > 1 && rule.ptr + 1 == rule.exps.size
+        target = rule.current
+        next unless target.is_a?(Symbol)
+        new_rules = @g.rules.select{|rule| rule.from == target}
+        @rules.concat Lr.deep_clone(new_rules)
+      end
     end
 
     def succeed(id)
+      next_rules = {}
       # separate rules to branch
       @rules.each do |rule|
         next if rule.current.nil?
-        rule = Marshal.load(Marshal.dump(rule))
-        @transitions[rule.current] ||= []
-        @transitions[rule.current].push rule
+        rule = Lr.deep_clone(rule)
+        next_rules[rule.current] ||= []
+        next_rules[rule.current].push rule
         rule.ptr += 1
       end
       # create children
-      @transitions.map do |sym, rules|
-        state = TransitionState.new(id, @g, rules)
-        @transitions[sym] = id
-        id += 1
-        state
+      next_states = []
+      next_rules.each do |sym, rules|
+        state = TransitionState.new(id, @g, rules, @list)
+        # join to existing state
+        joined = false
+        [*@list.list, *@list.stack].each do |exisiting_state|
+          next if exisiting_state != state
+          @transitions[sym] = exisiting_state.id
+          joined = true
+        end
+        unless joined
+          @transitions[sym] = id
+          id += 1
+          next_states.push state
+        end
       end
+      next_states
     end
 
     def to_s
       "#{@id} : #{@transitions.map{|sym,id| "#{sym} -> #{id}"}.join(', ')}"
     end
+
+    def ==(o)
+      return false if @rules.size != o.rules.size
+      @rules.zip(o.rules).all? {|r| r[0] == r[1]} # this == is override method
+    end
   end
 
   class TransitionStateList
-    attr_accessor :list
+    attr_accessor :list, :stack
 
     def initialize(grammer)
       @g = grammer
       @list = []
-      stack = [TransitionState.new(0, @g, @g.rules)]
-      while !stack.empty?
-        state = stack.shift
+      @stack = [TransitionState.new(0, @g, Lr.deep_clone(@g.rules), self)]
+      while !@stack.empty?
+        state = @stack.shift
         @list.push state
-        stack.concat state.succeed(@list.size + stack.size)
+        new_states = state.succeed(@list.size + @stack.size)
+        @stack.concat new_states
       end
     end
 
@@ -146,7 +177,7 @@ module Lr
           if rule.from == @g.start_symbol
             @table[state.id][nil] = [:acc]
           else
-            [*@g.terms, nil].each do |term|
+            @g.follows[rule.from].each do |term|
               @table[state.id][term] = [:reduce, rule.id]
             end
           end
@@ -165,6 +196,10 @@ module Lr
       end
       str
     end
+  end
+
+  def self.deep_clone(obj)
+    Marshal.load(Marshal.dump(obj))
   end
 end
 
