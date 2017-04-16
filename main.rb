@@ -1,4 +1,5 @@
 module Lr
+  require 'pp'
   class Rule
     attr_reader :id, :from, :exps
     attr_accessor :ptr, :look_ahead
@@ -78,9 +79,51 @@ module Lr
       symbols, terms = @follows[sym].partition{|elem| elem.is_a?(Symbol)}
       return terms if symbols.empty?
       symbols.each do |sym|
-        terms.concat resolve_symbol_follows(sym)
+        terms.concat resoelve_symbol_follows(sym)
       end
       @follows[sym] = terms.uniq
+    end
+  end
+
+  class Parser
+    def initialize(grammer, verbose=false)
+      @g = grammer
+      @table = @g.table.table
+      @verbose = verbose
+    end
+
+    def parse(tokens)
+      puts @g.table if @verbose
+      stack = [{state: 0, val: nil}]
+      result = []
+      while !tokens.empty?
+        next_token = tokens.first
+        command, operand = @table[stack.last[:state]][next_token]
+        print "next operation : " if @verbose
+        pp @table[stack.last[:state]][next_token] if @verbose
+        print "stack : " if @verbose
+        pp stack if @verbose
+        raise "No transition defined @ #{stack.last[:state]} => #{next_token}" unless command
+        case command
+        when :acc
+          raise "Accpet found on the middle of sentence" if tokens != [nil] || stack.size != 2
+          break
+        when :shift
+          stack.push({state: operand, val: tokens.shift})
+        when :reduce
+          rule = @g.rules[operand]
+          val = rule.exps.size.times.map do |_|
+            stack.pop[:val]
+          end
+          val.reverse!
+          val = val[0] if val.size == 1
+          # result.push({rule: rule.from, val: val})
+          goto_command = @table[stack.last[:state]][rule.from]
+          raise "No GOTO transition defined @ #{stack.last[:state]} => #{rule.from}" unless goto_command
+          stack.push({state: goto_command[1], val: val})
+        end
+      end
+      stack.last[:val]
     end
   end
 
@@ -232,6 +275,7 @@ module Lr
   end
 
   class Table
+    attr_reader :table
     def initialize(grammer)
       @g = grammer
       @states = @g.states
@@ -247,8 +291,16 @@ module Lr
             @table[state.id][nil] = [:acc]
           else
             rule.look_ahead.each do |term|
-              raise "#{@table[state.id][term][0]} / reduce conflict" if @table[state.id][term]
-              @table[state.id][term] = [:reduce, rule.id]
+              if @table[state.id][term]
+                if @table[state.id][term][0] == :shift
+                  # shift and reduce conflict => shift
+                else
+                  # reduce and reduce conflit => error!
+                  raise "#{} / reduce conflict"
+                end
+              else
+                @table[state.id][term] = [:reduce, rule.id]
+              end
             end
           end
         end
@@ -274,20 +326,19 @@ module Lr
 end
 
 if __FILE__ == $0
-  require 'pp'
   require 'pry'
-  def lalr1
-    g = Lr::Grammer.new [
-      [:s, :a],
-      [:a, :e, '=', :e],
-      [:a, 'id'],
-      [:e, :e, '+', :t],
-      [:e, :t],
-      [:t, 'num'],
-      [:t, 'id']
-    ]
-    puts g.states
-    puts g.table
-  end
-  lalr1
+  g = Lr::Grammer.new [
+    [:s, :add],
+    [:add, :add, '+', :mul],
+    [:add, :mul],
+    [:mul, :mul, '*', :num],
+    [:mul, :num],
+    [:num, '0'],
+    [:num, '1'],
+    [:num, '2'],
+  ]
+  parser = Lr::Parser.new(g)
+  sentence = ['2', '*', '1', '+', '1', '*', '0', nil]
+  result = parser.parse(sentence)
+  pp result
 end
