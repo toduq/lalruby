@@ -27,6 +27,10 @@ module Lr
     def ==(o)
       @id == o.id && @ptr == o.ptr && @look_ahead == o.look_ahead
     end
+
+    def equal_without_look_ahead(o)
+      @id == o.id && @ptr == o.ptr
+    end
   end
 
   class Grammer
@@ -100,7 +104,6 @@ module Lr
           @rules.concat Lr.deep_clone(new_rules)
           resolve_look_ahead
         end
-        puts current_rule_size.to_s + " -> " + @rules.size.to_s
       end while current_rule_size != @rules.size
     end
 
@@ -168,6 +171,11 @@ module Lr
       return false if @rules.size != o.rules.size
       @rules.zip(o.rules).all? {|r| r[0] == r[1]} # this == is override method
     end
+
+    def equal_without_look_ahead(o)
+      return false if @rules.size != o.rules.size
+      @rules.zip(o.rules).all? {|r| r[0].equal_without_look_ahead r[1]}
+    end
   end
 
   class TransitionStateList
@@ -185,6 +193,27 @@ module Lr
         @list.push state
         new_states = state.succeed(@list.size + @stack.size)
         @stack.concat new_states
+      end
+      merge_lalr_states
+    end
+
+    def merge_lalr_states
+      @list.combination(2) do |s1, s2|
+        next unless s1.equal_without_look_ahead s2
+        # merge s2 to s1
+        s1.rules.zip(s2.rules).each do |r1, r2|
+          r1.look_ahead.concat r2.look_ahead
+          r1.look_ahead.uniq!
+        end
+        @list.each do |state|
+          state.transitions.each do |from, to|
+            next if to != s2.id
+            state.transitions[from] = s1.id
+          end
+        end
+        @list.delete(s2)
+        merge_lalr_states
+        break
       end
     end
 
@@ -206,13 +235,12 @@ module Lr
     def initialize(grammer)
       @g = grammer
       @states = @g.states
-      @table = []
+      @table = {}
       @states.list.each do |state|
         @table[state.id] = {}
         state.transitions.map do |sym, to|
           @table[state.id][sym] = [sym.is_a?(Symbol) ? :goto : :shift, to]
         end
-        # MEMO: error if terminated rules > 1
         state.rules.each do |rule|
           next unless rule.current.nil?
           if rule.from == @g.start_symbol
@@ -220,7 +248,6 @@ module Lr
           else
             rule.look_ahead.each do |term|
               raise "#{@table[state.id][term][0]} / reduce conflict" if @table[state.id][term]
-              # binding.pry if @table[state.id][term]
               @table[state.id][term] = [:reduce, rule.id]
             end
           end
@@ -234,7 +261,7 @@ module Lr
       str = ''
       str << "    |" + columns.map{|t| (t||'$').to_s.rjust(5)}.join('|') + "\n"
       str << "----" + "------" * columns.size + "\n"
-      @table.each_with_index do |row, id|
+      @table.each do |id, row|
         str << id.to_s.rjust(4) + "|" + columns.map{|t| row[t] ? (row[t][0][0] + (row[t][1].to_s||'')).rjust(5) : ' '*5}.join('|') + "\n"
       end
       str
@@ -249,31 +276,7 @@ end
 if __FILE__ == $0
   require 'pp'
   require 'pry'
-
-  def lr0
-    g = Lr::Grammer.new [
-      [:s, :e],
-      [:e, :e, '+', 'num'],
-      [:e, :e, '*', 'num'],
-      [:e, 'num']
-    ]
-    puts g.states
-    puts g.table
-  end
-
-  def slr1
-    g = Lr::Grammer.new [
-      [:s, :e],
-      [:e, :e, '+', :t],
-      [:e, :t],
-      [:t, :t, '*', 'num'],
-      [:t, 'num']
-    ]
-    puts g.states
-    puts g.table
-  end
-
-  def lr1
+  def lalr1
     g = Lr::Grammer.new [
       [:s, :a],
       [:a, :e, '=', :e],
@@ -283,9 +286,8 @@ if __FILE__ == $0
       [:t, 'num'],
       [:t, 'id']
     ]
-    puts g.states.dump
     puts g.states
     puts g.table
   end
-  lr1
+  lalr1
 end
