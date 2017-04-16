@@ -1,7 +1,7 @@
 module Lr
   class Rule
     attr_reader :id, :from, :exps
-    attr_accessor :ptr
+    attr_accessor :ptr, :look_ahead
 
     def initialize(id, from, exps=nil)
       from, *exps = from if exps.nil?
@@ -9,6 +9,7 @@ module Lr
       @from = from
       @exps = exps
       @ptr = 0
+      @look_ahead = []
     end
 
     def elems
@@ -16,19 +17,15 @@ module Lr
     end
 
     def to_s
-      "#{from} -> #{exps.join(' ')}"
+      "#{from} -> #{exps.join(' ')} [#{@look_ahead.map{|l| l ? l : 'nil'}.join(',')}]"
     end
 
     def current
       @exps[@ptr]
     end
 
-    def terminated?
-      @ptr + 1 == @exps.size
-    end
-
     def ==(o)
-      @id == o.id && @ptr == o.ptr
+      @id == o.id && @ptr == o.ptr && @look_ahead == o.look_ahead
     end
   end
 
@@ -41,7 +38,7 @@ module Lr
       @symbols, @terms = @rules.map(&:elems).flatten.uniq.partition{|elem| elem.is_a?(Symbol)}
       @firsts = {}
       resolve_firsts(@start_symbol)
-      resolve_follows
+      #resolve_follows
       @states = TransitionStateList.new(self)
       @table = Table.new(self)
     end
@@ -92,13 +89,45 @@ module Lr
       @rules = rules
       @transitions = {}
       # expand [A -> v @ B] to rules that starts with B [B -> *]
-      @rules.each do |rule|
-        next unless rule.exps.size > 1 && rule.ptr + 1 == rule.exps.size
-        target = rule.current
-        next unless target.is_a?(Symbol)
-        new_rules = @g.rules.select{|rule| rule.from == target}
-        @rules.concat Lr.deep_clone(new_rules)
-      end
+      begin
+        current_rule_size = @rules.size
+        @rules.each do |rule|
+          next unless rule.ptr + 1 == rule.exps.size
+          target = rule.current
+          next unless target.is_a?(Symbol)
+          new_rules = @g.rules.select{|rule| rule.from == target}
+          next if (new_rules.map(&:id) - @rules.map(&:id)).empty?
+          @rules.concat Lr.deep_clone(new_rules)
+          resolve_look_ahead
+        end
+        puts current_rule_size.to_s + " -> " + @rules.size.to_s
+      end while current_rule_size != @rules.size
+    end
+
+    def resolve_look_ahead
+      begin
+        updated = false
+        @rules.each do |rule|
+          next unless Symbol === rule.current
+          next_elem = rule.exps[rule.ptr + 1]
+          if next_elem == nil
+            resolved = rule.look_ahead
+          elsif Symbol === next_elem
+            resolved = @g.firsts[next_elem]
+          else
+            resolved = [next_elem]
+          end
+          next if resolved.empty?
+          @rules.each do |updating_rule|
+            next if updating_rule.from != rule.current
+            next if (resolved - updating_rule.look_ahead).empty?
+            updated = true
+            updating_rule.look_ahead.concat resolved
+            updating_rule.look_ahead.uniq!
+          end
+        end
+      end while updated
+      self
     end
 
     def succeed(id)
@@ -147,7 +176,10 @@ module Lr
     def initialize(grammer)
       @g = grammer
       @list = []
-      @stack = [TransitionState.new(0, @g, Lr.deep_clone(@g.rules), self)]
+      state = TransitionState.new(0, @g, Lr.deep_clone(@g.rules), self)
+      state.rules.first.look_ahead = [nil]
+      state.resolve_look_ahead
+      @stack = [state]
       while !@stack.empty?
         state = @stack.shift
         @list.push state
@@ -158,6 +190,15 @@ module Lr
 
     def to_s
       @list.map(&:to_s).join("\n")
+    end
+
+    def dump
+      str = ''
+      @list.each do |state|
+        str << "**" + state.id.to_s + "\n"
+        state.rules.each{|rule| str << rule.to_s + "\n"}
+      end
+      str
     end
   end
 
@@ -177,7 +218,9 @@ module Lr
           if rule.from == @g.start_symbol
             @table[state.id][nil] = [:acc]
           else
-            @g.follows[rule.from].each do |term|
+            rule.look_ahead.each do |term|
+              raise "#{@table[state.id][term][0]} / reduce conflict" if @table[state.id][term]
+              # binding.pry if @table[state.id][term]
               @table[state.id][term] = [:reduce, rule.id]
             end
           end
@@ -206,21 +249,43 @@ end
 if __FILE__ == $0
   require 'pp'
   require 'pry'
-  # lr0 = Lr::Grammer.new [
-  #   [:s, :e],
-  #   [:e, :e, '+', 'num'],
-  #   [:e, :e, '*', 'num'],
-  #   [:e, 'num']
-  # ]
-  # puts lr0.states
-  # puts lr0.table
-  slr1 = Lr::Grammer.new [
-    [:s, :e],
-    [:e, :e, '+', :t],
-    [:e, :t],
-    [:t, :t, '*', 'num'],
-    [:t, 'num']
-  ]
-  puts slr1.states
-  puts slr1.table
+
+  def lr0
+    g = Lr::Grammer.new [
+      [:s, :e],
+      [:e, :e, '+', 'num'],
+      [:e, :e, '*', 'num'],
+      [:e, 'num']
+    ]
+    puts g.states
+    puts g.table
+  end
+
+  def slr1
+    g = Lr::Grammer.new [
+      [:s, :e],
+      [:e, :e, '+', :t],
+      [:e, :t],
+      [:t, :t, '*', 'num'],
+      [:t, 'num']
+    ]
+    puts g.states
+    puts g.table
+  end
+
+  def lr1
+    g = Lr::Grammer.new [
+      [:s, :a],
+      [:a, :e, '=', :e],
+      [:a, 'id'],
+      [:e, :e, '+', :t],
+      [:e, :t],
+      [:t, 'num'],
+      [:t, 'id']
+    ]
+    puts g.states.dump
+    puts g.states
+    puts g.table
+  end
+  lr1
 end
